@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Superset Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+      .dashboard-container {
+        width: 100%;
+        height: 100vh;
+        position: relative;
+      }
+      .superset-iframe {
+        width: 100%;
+        height: 100%;
+        border: none;
+      }
+      .error-message {
+        color: #dc3545;
+        padding: 10px;
+        margin: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div v-if="error" class="error-message">
+        {{ error }}
+        <button @click="retryInitialization">Retry</button>
+      </div>
+      <div class="dashboard-container">
+        <superset-dashboard
+          v-if="isReady"
+          :dashboard-url="dashboardUrl"
+          :guest-token="guestToken"
+          @error="handleError"
+        ></superset-dashboard>
+        <div v-else>Loading dashboard...</div>
+      </div>
+    </div>
+
+    <script>
+      // Create axios instance with default configuration
+      const supersetApi = axios.create({
+        baseURL: "http://localhost:3031",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        withCredentials: true,
+      });
+
+      Vue.component("superset-dashboard", {
+        props: {
+          dashboardUrl: String,
+          guestToken: String,
+        },
+        computed: {
+          embedUrl() {
+            // Keep everything through our proxy
+            const url = new URL(this.dashboardUrl);
+            if (this.guestToken) {
+              url.searchParams.set("guest_token", this.guestToken);
+            }
+            url.searchParams.set("standalone", "true");
+            return url.toString();
+          },
+        },
+        template: `
+                <iframe
+                    :src="embedUrl"
+                    class="superset-iframe"
+                    @load="$emit('load')"
+                    @error="$emit('error', $event)"
+                ></iframe>
+            `,
+      });
+
+      new Vue({
+        el: "#app",
+        data: {
+          // Keep using our proxy URL
+          dashboardUrl: "http://localhost:3031/superset/dashboard/11/",
+          guestToken: null,
+          error: null,
+          isReady: false,
+        },
+        methods: {
+          async getCsrfToken() {
+            try {
+              const response = await supersetApi.get(
+                "/api/v1/security/csrf_token/"
+              );
+              return response.data.result;
+            } catch (error) {
+              console.error("CSRF token error:", error.response?.data || error);
+              throw new Error("Failed to get CSRF token");
+            }
+          },
+
+          async login() {
+            try {
+              const csrfToken = await this.getCsrfToken();
+              supersetApi.defaults.headers.common["X-CSRFToken"] = csrfToken;
+
+              const response = await supersetApi.post(
+                "/api/v1/security/login",
+                {
+                  username: "admin",
+                  password: "admin",
+                  provider: "db",
+                  refresh: true,
+                }
+              );
+
+              if (response.data.access_token) {
+                supersetApi.defaults.headers.common[
+                  "Authorization"
+                ] = `Bearer ${response.data.access_token}`;
+                return response.data.access_token;
+              }
+              throw new Error("No access token received");
+            } catch (error) {
+              console.error("Login error:", error.response?.data || error);
+              throw new Error("Authentication failed");
+            }
+          },
+
+          async getGuestToken(accessToken) {
+            try {
+              const response = await supersetApi.post(
+                "/api/v1/security/guest_token/",
+                {
+                  resources: [{ type: "dashboard", id: "11" }],
+                  rls: [],
+                  user: {
+                    username: "guest",
+                    first_name: "Guest",
+                    last_name: "User",
+                  },
+                }
+              );
+              return response.data.token;
+            } catch (error) {
+              console.error(
+                "Guest token error:",
+                error.response?.data || error
+              );
+              throw new Error("Failed to generate guest token");
+            }
+          },
+
+          async initialize() {
+            try {
+              const accessToken = await this.login();
+              this.guestToken = await this.getGuestToken(accessToken);
+              this.isReady = true;
+              this.error = null;
+            } catch (error) {
+              this.error = error.message;
+              this.isReady = false;
+            }
+          },
+
+          retryInitialization() {
+            this.error = null;
+            this.initialize();
+          },
+
+          handleError(error) {
+            this.error = "Failed to load dashboard";
+            console.error(error);
+          },
+        },
+        mounted() {
+          this.initialize();
+        },
+      });
+    </script>
+  </body>
+</html>
